@@ -21,25 +21,25 @@ const planos = [
     id: 1,
     title: "Base Giratoria",
     description: "Base con múltiples soportes de montaje en forma de estrella",
-    url: "/images/plano-1.jpeg",
+    url: "/images/PLANO-1.jpeg",
   },
   {
     id: 2,
     title: "Carcasa del Brazo",
     description: "Pieza de alojamiento con ranuras y orificios de montaje",
-    url: "/images/plano-2.jpeg",
+    url: "/images/PLANO-2.jpeg",
   },
   {
     id: 3,
     title: "Carcasa del Brazo (Vista Alternativa)",
     description: "Vistas ortográficas adicionales de la carcasa",
-    url: "/images/plano-3.jpeg",
+    url: "/images/PLANO-3.jpeg",
   },
   {
     id: 4,
     title: "Garra / Horquilla",
     description: "Mecanismo de agarre tipo montacargas con dientes",
-    url: "/images/plano-4.jpeg",
+    url: "/images/PLANO-4.jpeg",
   },
 ]
 
