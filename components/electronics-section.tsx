@@ -5,7 +5,7 @@ import { motion } from "framer-motion"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import { Zap, Cpu, CircuitBoard, Settings2, AlertCircle } from "lucide-react"
+import { Zap, Cpu, CircuitBoard, Settings2, AlertCircle, Play } from "lucide-react"
 
 const components = [
   {
@@ -146,15 +146,15 @@ export function ElectronicsSection() {
           </Card>
         </motion.div>
 
-        {/* Additional Info Cards */}
-        <div className="grid md:grid-cols-2 gap-6">
+        {/* Info Cards Grid - now 3 columns */}
+        <div className="grid md:grid-cols-3 gap-6">
           <motion.div
             initial={{ opacity: 0, x: -20 }}
             whileInView={{ opacity: 1, x: 0 }}
             viewport={{ once: true }}
             transition={{ duration: 0.6 }}
           >
-            <Card>
+            <Card className="h-full">
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
                   <Zap className="w-5 h-5 text-primary" />
@@ -163,19 +163,19 @@ export function ElectronicsSection() {
               </CardHeader>
               <CardContent className="space-y-3">
                 <div className="flex justify-between items-center py-2 border-b border-border">
-                  <span className="text-muted-foreground">Corriente pico total</span>
+                  <span className="text-muted-foreground text-sm">Corriente pico total</span>
                   <span className="font-mono text-primary">13.3 A</span>
                 </div>
                 <div className="flex justify-between items-center py-2 border-b border-border">
-                  <span className="text-muted-foreground">Potencia requerida (6V)</span>
+                  <span className="text-muted-foreground text-sm">Potencia requerida (6V)</span>
                   <span className="font-mono text-primary">79.8 W</span>
                 </div>
                 <div className="flex justify-between items-center py-2 border-b border-border">
-                  <span className="text-muted-foreground">Corriente desde fuente 12V</span>
+                  <span className="text-muted-foreground text-sm">Corriente desde fuente 12V</span>
                   <span className="font-mono text-primary">7.4 A</span>
                 </div>
                 <div className="flex justify-between items-center py-2">
-                  <span className="text-muted-foreground">Capacidad utilizada</span>
+                  <span className="text-muted-foreground text-sm">Capacidad utilizada</span>
                   <Badge variant="outline" className="border-green-500 text-green-500">
                     74%
                   </Badge>
@@ -185,12 +185,12 @@ export function ElectronicsSection() {
           </motion.div>
 
           <motion.div
-            initial={{ opacity: 0, x: 20 }}
-            whileInView={{ opacity: 1, x: 0 }}
+            initial={{ opacity: 0, y: 20 }}
+            whileInView={{ opacity: 1, y: 0 }}
             viewport={{ once: true }}
-            transition={{ duration: 0.6 }}
+            transition={{ duration: 0.6, delay: 0.1 }}
           >
-            <Card className="border-yellow-500/30">
+            <Card className="h-full border-yellow-500/30">
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
                   <AlertCircle className="w-5 h-5 text-yellow-500" />
@@ -200,20 +200,47 @@ export function ElectronicsSection() {
               </CardHeader>
               <CardContent>
                 <p className="text-sm text-muted-foreground mb-4">
-                  El servo MG90S de la garra opera a máximo 6V pero funciona óptimamente a 5V. Al conectar los MG946 a
-                  6V para máximo torque, se implementa una protección:
+                  El servo MG90S opera óptimamente a 5V. Con 6V para los MG946:
                 </p>
-                <div className="p-4 rounded-lg bg-secondary font-mono text-sm">
-                  <p className="text-yellow-500 mb-2">// Diodo 1N4007 en serie</p>
+                <div className="p-3 rounded-lg bg-secondary font-mono text-xs">
+                  <p className="text-yellow-500 mb-1">// Diodo 1N4007 en serie</p>
                   <p className="text-muted-foreground">
-                    Voltaje entrada: <span className="text-primary">6.0V</span>
+                    Entrada: <span className="text-primary">6.0V</span>
                   </p>
                   <p className="text-muted-foreground">
-                    Caída del diodo: <span className="text-yellow-500">-0.7V</span>
+                    Caída: <span className="text-yellow-500">-0.7V</span>
                   </p>
                   <p className="text-foreground">
-                    Voltaje al servo: <span className="text-green-500">5.3V</span> ✓
+                    Salida: <span className="text-green-500">5.3V</span>
                   </p>
+                </div>
+              </CardContent>
+            </Card>
+          </motion.div>
+
+          <motion.div
+            initial={{ opacity: 0, x: 20 }}
+            whileInView={{ opacity: 1, x: 0 }}
+            viewport={{ once: true }}
+            transition={{ duration: 0.6, delay: 0.2 }}
+          >
+            <Card className="h-full">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Play className="w-5 h-5 text-primary" />
+                  Video Explicativo
+                </CardTitle>
+                <CardDescription>Funcionamiento del circuito</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="relative w-full aspect-video rounded-lg overflow-hidden bg-black">
+                  <iframe
+                    src="https://www.youtube.com/embed/dWPu-3H1894"
+                    title="Explicación del Circuito Electrónico"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                    allowFullScreen
+                    className="absolute inset-0 w-full h-full"
+                  />
                 </div>
               </CardContent>
             </Card>
