@@ -12,65 +12,60 @@ const arduinoCode = `#include <Wire.h>
 
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
 
-// Longitudes de segmentos (mm)
-#define L1 100  // Base a hombro
-#define L2 130  // Hombro a codo
-#define L3 130  // Codo a efector
+// --- Antes calibrado ---
+// Estos valores los uso porque ya comprobé que colocan al servo MG946R
+// exactamente en 0° y 180°. Con esto garantizo precisión en el movimiento.
+int SERVOMIN = 110;   // Pulso que corresponde a 0°
+int SERVOMAX = 500;   // Pulso que corresponde a 180°
 
-// Canales de servos en PCA9685
-#define SERVO_BASE    0
-#define SERVO_HOMBRO  1
-#define SERVO_CODO    2
-#define SERVO_GARRA   3
+int servo1 = 0;   // Servo de la BASE
+int servo2 = 1;   // Servo del BRAZO
+int servo3 = 2;   // Servo del HOMBRO
+
+// Esta función transforma un ángulo (0 a 180°)
+// en el pulso real que el PCA9685 necesita.
+// La hice así para no repetir cálculos y mantener el código limpio.
+int angleToPulse(int ang){
+  return map(ang, 0, 180, SERVOMIN, SERVOMAX);
+}
 
 void setup() {
   Serial.begin(9600);
+
+  // Inicializo el módulo PCA9685 y configuro su frecuencia en 50 Hz,
+  // que es la frecuencia estándar para servomotores.
   pwm.begin();
-  pwm.setPWMFreq(50);  // Frecuencia estándar para servos
+  pwm.setPWMFreq(50);
+
+  delay(500); // Le doy un pequeño respiro antes de empezar.
 }
 
-// Función principal de cinemática inversa
-void irACoordenada(float x, float y, float z) {
-  // Calcular ángulo de base (rotación en plano XY)
-  float anguloBase = atan2(x, y) * (180.0 / PI);
-  
-  // Distancia en el plano del brazo
-  float r = sqrt(x*x + y*y);
-  
-  // Ley de cosenos para ángulo del codo
-  float cosTheta2 = (r*r - L2*L2 - L3*L3) / (2*L2*L3);
-  cosTheta2 = constrain(cosTheta2, -1.0, 1.0);
-  float anguloCodo = acos(cosTheta2) * (180.0 / PI);
-  
-  // Calcular ángulo del hombro
-  float anguloHombro = (atan2(y, r) - 
-    atan2(L3*sin(anguloCodo*PI/180), 
-          L2 + L3*cos(anguloCodo*PI/180))) * (180.0/PI);
-  
-  // Mover servos a posiciones calculadas
-  moverServo(SERVO_BASE, anguloBase);
-  moverServo(SERVO_HOMBRO, anguloHombro);
-  moverServo(SERVO_CODO, anguloCodo);
-  
-  Serial.print("Moviendo a: X=");
-  Serial.print(x);
-  Serial.print(" Y=");
-  Serial.print(y);
-  Serial.println();
-}
+// Aquí programé una función para mover los 3 servos al mismo tiempo.
+// Lo que hago es calcular el pulso equivalente al ángulo deseado
+// y enviarlo a los 3 canales simultáneamente.
+void mover3Servos(int angulo){
+  int pulso = angleToPulse(angulo);
 
-void moverServo(int canal, float angulo) {
-  // Mapear ángulo (0-180) a pulso PWM (150-600)
-  int pulso = map(angulo, 0, 180, 150, 600);
-  pwm.setPWM(canal, 0, pulso);
+  pwm.setPWM(servo1, 0, pulso);  // Muevo la base
+  pwm.setPWM(servo2, 0, pulso);  // Muevo el brazo
+  pwm.setPWM(servo3, 0, pulso);  // Muevo el hombro
 }
 
 void loop() {
-  // Ejemplo: mover a posición de paletizado
-  irACoordenada(150, 150, 0);
-  delay(2000);
+
+  // En esta secuencia hago que los 3 servos se muevan juntos.
+  // Es como una pequeña coreografía mecánica.
   
-  irACoordenada(100, 200, 0);
+  mover3Servos(0);    // Los pongo en su posición inicial (0°)
+  delay(2000);        // Los dejo ahí 2 segundos
+
+  mover3Servos(90);   // Los llevo al centro (90°)
+  delay(2000);
+
+  mover3Servos(180);  // Los llevo al extremo opuesto (180°)
+  delay(2000);
+
+  mover3Servos(90);   // Regresan al centro
   delay(2000);
 }`
 
