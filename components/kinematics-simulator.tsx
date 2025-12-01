@@ -5,80 +5,96 @@ import { motion } from "framer-motion"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Slider } from "@/components/ui/slider"
 import { Badge } from "@/components/ui/badge"
-import { Cpu } from "lucide-react"
+import { Cpu, AlertCircle } from "lucide-react"
 
-// Robot arm segment lengths
-const L1 = 100 // Base to shoulder
-const L2 = 130 // Shoulder to elbow
-const L3 = 130 // Elbow to end effector
+// Dimensiones del brazo (en mm o unidades relativas)
+const L1 = 100 // Base (altura fija del suelo al hombro)
+const L2 = 130 // Hombro a Codo
+const L3 = 130 // Codo a Efector Final
 
 export function KinematicsSimulator() {
+  // Estado inicial: Posición X, Y deseada desde el origen (suelo, centro)
   const [targetX, setTargetX] = useState(150)
   const [targetY, setTargetY] = useState(150)
 
-  // Inverse kinematics calculation
+  // --- LÓGICA DE CINEMÁTICA INVERSA (IK) ---
   const calculateAngles = useCallback((x: number, y: number) => {
-    // Distance from base to target
-    const dist = Math.sqrt(x * x + y * y)
+    // 1. Transformación de Coordenadas: Del Mundo al Hombro
+    // Restamos L1 para trabajar en el sistema de referencia del hombro (Joint 2)
+    const dy = y - L1 
+    const dx = x 
 
-    // Clamp to reachable space
+    // Distancia desde el hombro al objetivo
+    const dist = Math.sqrt(dx * dx + dy * dy)
+
+    // Límites mecánicos
     const maxReach = L2 + L3
     const minReach = Math.abs(L2 - L3)
+    let safeX = dx
+    let safeY = dy
 
-    if (dist > maxReach || dist < minReach) {
-      // Normalize to max reach if out of bounds
-      const scale = dist > maxReach ? maxReach / dist : minReach / dist
-      x = x * scale * 0.95
-      y = y * scale * 0.95
+    // Si el objetivo está fuera de alcance, proyectamos al punto más cercano válido
+    if (dist > maxReach || dist < 0.1) { // 0.1 evita división por cero
+      const scale = (dist > maxReach ? maxReach : minReach) / dist
+      safeX = dx * scale * 0.99 // 0.99 para evitar singularidad numérica extrema
+      safeY = dy * scale * 0.99
     }
 
-    // Base angle (rotation around Z-axis)
-    const baseAngle = Math.atan2(x, y)
+    // Recalculamos distancia segura
+    const r = Math.sqrt(safeX * safeX + safeY * safeY)
 
-    // Distance in the arm plane
-    const r = Math.sqrt(x * x + y * y)
-
-    // Using law of cosines for the two-link arm
+    // 2. Ley de Cosenos para el Codo (Theta 2)
+    // c² = a² + b² - 2ab cos(C)
     const cosElbow = (r * r - L2 * L2 - L3 * L3) / (2 * L2 * L3)
-    const clampedCosElbow = Math.max(-1, Math.min(1, cosElbow))
-    const elbowAngle = Math.acos(clampedCosElbow)
+    // Clamp para seguridad matemática
+    const clampedCosElbow = Math.max(-1, Math.min(1, cosElbow)) 
+    // Configuración "Codo Arriba" (negativo) o "Codo Abajo" (positivo). Usamos codo abajo (positivo).
+    const elbowAngleRad = -Math.acos(clampedCosElbow) 
 
-    // Shoulder angle
-    const shoulderAngle = Math.atan2(y, x) - Math.atan2(L3 * Math.sin(elbowAngle), L2 + L3 * Math.cos(elbowAngle))
+    // 3. Cálculo del Hombro (Theta 1)
+    // Ángulo geométrico al punto (atan2) +/- corrección por la flexión del codo
+    const alpha = Math.atan2(safeY, safeX)
+    const beta = Math.atan2(L3 * Math.sin(elbowAngleRad), L2 + L3 * Math.cos(elbowAngleRad))
+    const shoulderAngleRad = alpha - beta
 
     return {
-      base: (baseAngle * 180) / Math.PI,
-      shoulder: (shoulderAngle * 180) / Math.PI,
-      elbow: (elbowAngle * 180) / Math.PI,
+      shoulder: shoulderAngleRad, // Radianes para cálculos internos
+      elbow: elbowAngleRad,       // Radianes para cálculos internos
+      shoulderDeg: (shoulderAngleRad * 180) / Math.PI, // Grados para UI
+      elbowDeg: (elbowAngleRad * 180) / Math.PI,       // Grados para UI
+      isUnreachable: dist > maxReach
     }
   }, [])
 
-  const angles = useMemo(() => calculateAngles(targetX, targetY), [targetX, targetY, calculateAngles])
+  const ikResult = useMemo(() => calculateAngles(targetX, targetY), [targetX, targetY, calculateAngles])
 
-  // Calculate joint positions for SVG
+  // --- CÁLCULO DE POSICIONES PARA SVG (FORWARD KINEMATICS PARA DIBUJAR) ---
   const jointPositions = useMemo(() => {
-    const shoulderRad = (angles.shoulder * Math.PI) / 180
-    const elbowRad = (angles.elbow * Math.PI) / 180
+    const { shoulder, elbow } = ikResult
 
-    // Base position (center of SVG)
+    // Origen del SVG (Centro inferior)
     const baseX = 200
-    const baseY = 350
+    const baseY = 350 // "Suelo" visual
 
-    // Shoulder joint (end of L1)
+    // Posición del Hombro (fijo sobre la base L1)
+    // Nota: En SVG, Y crece hacia abajo, por eso restamos para ir "arriba"
     const shoulderX = baseX
     const shoulderY = baseY - L1
 
-    // Elbow joint (end of L2)
-    const elbowX = shoulderX + L2 * Math.cos(Math.PI / 2 - shoulderRad)
-    const elbowY = shoulderY - L2 * Math.sin(Math.PI / 2 - shoulderRad)
+    // Posición del Codo
+    // x = x0 + L * cos(theta)
+    // y = y0 - L * sin(theta) (Menos porque Y SVG es invertido)
+    const elbowX = shoulderX + L2 * Math.cos(shoulder)
+    const elbowY = shoulderY - L2 * Math.sin(shoulder)
 
-    // End effector (end of L3)
-    const combinedAngle = shoulderRad - (Math.PI - elbowRad)
-    const endX = elbowX + L3 * Math.cos(Math.PI / 2 - combinedAngle)
-    const endY = elbowY - L3 * Math.sin(Math.PI / 2 - combinedAngle)
+    // Posición del Efector Final
+    // El ángulo absoluto del antebrazo es (theta1 + theta2)
+    const absoluteElbowAngle = shoulder + elbow
+    const endX = elbowX + L3 * Math.cos(absoluteElbowAngle)
+    const endY = elbowY - L3 * Math.sin(absoluteElbowAngle)
 
     return { baseX, baseY, shoulderX, shoulderY, elbowX, elbowY, endX, endY }
-  }, [angles])
+  }, [ikResult])
 
   return (
     <section id="simulador" className="py-20 px-4">
@@ -92,180 +108,137 @@ export function KinematicsSimulator() {
         >
           <Badge variant="outline" className="mb-4 border-primary/50 text-primary">
             <Cpu className="w-4 h-4 mr-2" />
-            Interactivo
+            Ingeniería Mecatrónica
           </Badge>
-          <h2 className="text-3xl md:text-4xl font-bold mb-4">Simulación de Cinemática Inversa</h2>
+          <h2 className="text-3xl md:text-4xl font-bold mb-4">Simulador de Brazo 2-DOF</h2>
           <p className="text-muted-foreground max-w-2xl mx-auto">
-            Controla la posición del efector final y observa cómo el brazo calcula los ángulos necesarios
+            Cinemática Inversa en tiempo real con corrección de sistema de referencia.
           </p>
         </motion.div>
 
         <div className="grid lg:grid-cols-2 gap-8">
-          {/* SVG Visualization */}
+          {/* VISUALIZACIÓN */}
           <motion.div
             initial={{ opacity: 0, scale: 0.95 }}
             whileInView={{ opacity: 1, scale: 1 }}
             viewport={{ once: true }}
             transition={{ duration: 0.6 }}
           >
-            <Card className="overflow-hidden">
-              <CardContent className="p-0">
-                <svg viewBox="0 0 400 400" className="w-full h-auto bg-card" style={{ maxHeight: "400px" }}>
-                  {/* Grid lines */}
+            <Card className="overflow-hidden bg-slate-950 border-slate-800">
+              <CardContent className="p-0 relative">
+                {/* Indicador de error si está fuera de alcance */}
+                {ikResult.isUnreachable && (
+                  <div className="absolute top-4 right-4 bg-red-500/10 text-red-500 px-3 py-1 rounded-full text-xs font-bold flex items-center border border-red-500/20">
+                    <AlertCircle className="w-3 h-3 mr-1" />
+                    Fuera de Alcance
+                  </div>
+                )}
+                
+                <svg viewBox="0 0 400 400" className="w-full h-auto" style={{ maxHeight: "400px" }}>
+                  {/* Grid */}
                   <defs>
                     <pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse">
-                      <path
-                        d="M 20 0 L 0 0 0 20"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="0.5"
-                        className="text-primary/10"
-                      />
+                      <path d="M 20 0 L 0 0 0 20" fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="0.5" />
                     </pattern>
                   </defs>
                   <rect width="400" height="400" fill="url(#grid)" />
 
-                  {/* Base platform */}
+                  {/* Eje Y (Suelo) */}
+                  <line x1="0" y1="350" x2="400" y2="350" stroke="rgba(255,255,255,0.2)" strokeWidth="1" />
+
+                  {/* L1: Base Estática */}
                   <rect
-                    x={jointPositions.baseX - 40}
-                    y={jointPositions.baseY}
-                    width="80"
-                    height="20"
-                    rx="4"
-                    className="fill-muted stroke-primary"
+                    x={jointPositions.baseX - 15}
+                    y={jointPositions.shoulderY}
+                    width="30"
+                    height={L1}
+                    className="fill-slate-800 stroke-slate-600"
                     strokeWidth="2"
                   />
-
-                  {/* Arm segments */}
-                  {/* Segment 1: Base to Shoulder */}
-                  <motion.line
-                    x1={jointPositions.baseX}
-                    y1={jointPositions.baseY}
-                    x2={jointPositions.shoulderX}
-                    y2={jointPositions.shoulderY}
-                    className="stroke-muted-foreground"
-                    strokeWidth="12"
-                    strokeLinecap="round"
-                    initial={false}
-                    animate={{
-                      x2: jointPositions.shoulderX,
-                      y2: jointPositions.shoulderY,
-                    }}
-                    transition={{ type: "spring", stiffness: 100, damping: 20 }}
+                   {/* Base Foot */}
+                   <rect
+                    x={jointPositions.baseX - 30}
+                    y={jointPositions.baseY - 5}
+                    width="60"
+                    height="10"
+                    className="fill-slate-700"
+                    rx="2"
                   />
 
-                  {/* Segment 2: Shoulder to Elbow */}
+                  {/* L2: Hombro a Codo */}
                   <motion.line
-                    x1={jointPositions.shoulderX}
-                    y1={jointPositions.shoulderY}
-                    x2={jointPositions.elbowX}
-                    y2={jointPositions.elbowY}
-                    className="stroke-primary"
-                    strokeWidth="10"
-                    strokeLinecap="round"
-                    initial={false}
                     animate={{
                       x1: jointPositions.shoulderX,
                       y1: jointPositions.shoulderY,
                       x2: jointPositions.elbowX,
                       y2: jointPositions.elbowY,
                     }}
-                    transition={{ type: "spring", stiffness: 100, damping: 20 }}
+                    className="stroke-blue-500"
+                    strokeWidth="12"
+                    strokeLinecap="round"
                   />
 
-                  {/* Segment 3: Elbow to End Effector */}
+                  {/* L3: Codo a Efector */}
                   <motion.line
-                    x1={jointPositions.elbowX}
-                    y1={jointPositions.elbowY}
-                    x2={jointPositions.endX}
-                    y2={jointPositions.endY}
-                    className="stroke-primary/70"
-                    strokeWidth="8"
-                    strokeLinecap="round"
-                    initial={false}
                     animate={{
                       x1: jointPositions.elbowX,
                       y1: jointPositions.elbowY,
                       x2: jointPositions.endX,
                       y2: jointPositions.endY,
                     }}
-                    transition={{ type: "spring", stiffness: 100, damping: 20 }}
+                    className="stroke-indigo-400"
+                    strokeWidth="8"
+                    strokeLinecap="round"
                   />
 
-                  {/* Joints */}
-                  <circle
-                    cx={jointPositions.baseX}
-                    cy={jointPositions.baseY}
-                    r="8"
-                    className="fill-secondary stroke-primary"
-                    strokeWidth="2"
-                  />
-                  <motion.circle
-                    cx={jointPositions.shoulderX}
-                    cy={jointPositions.shoulderY}
-                    r="7"
-                    className="fill-secondary stroke-primary"
-                    strokeWidth="2"
-                    initial={false}
-                    animate={{
-                      cx: jointPositions.shoulderX,
-                      cy: jointPositions.shoulderY,
-                    }}
-                    transition={{ type: "spring", stiffness: 100, damping: 20 }}
-                  />
-                  <motion.circle
-                    cx={jointPositions.elbowX}
-                    cy={jointPositions.elbowY}
-                    r="6"
-                    className="fill-secondary stroke-primary"
-                    strokeWidth="2"
-                    initial={false}
-                    animate={{
-                      cx: jointPositions.elbowX,
-                      cy: jointPositions.elbowY,
-                    }}
-                    transition={{ type: "spring", stiffness: 100, damping: 20 }}
+                  {/* Joints (Articulaciones) */}
+                  <circle cx={jointPositions.shoulderX} cy={jointPositions.shoulderY} r="6" fill="white" />
+                  <motion.circle 
+                    animate={{ cx: jointPositions.elbowX, cy: jointPositions.elbowY }} 
+                    r="5" 
+                    fill="white" 
                   />
 
-                  {/* End effector (gripper) */}
+                  {/* Efector Final */}
+                  <motion.circle 
+                    animate={{ cx: jointPositions.endX, cy: jointPositions.endY }} 
+                    r="8" 
+                    className="fill-green-400 stroke-white" 
+                    strokeWidth="2"
+                  />
+
+                  {/* TARGET VISUAL (Objetivo) */}
+                  {/* Ahora mapea 1:1 con las coordenadas matemáticas */}
                   <motion.g
-                    initial={false}
-                    animate={{
-                      x: jointPositions.endX - 200,
-                      y: jointPositions.endY - 200,
+                     animate={{
+                      x: 200 + targetX, // 200 es el centro X
+                      y: 350 - targetY  // 350 es el suelo Y
                     }}
-                    transition={{ type: "spring", stiffness: 100, damping: 20 }}
                   >
-                    <circle
-                      cx="200"
-                      cy="200"
-                      r="10"
-                      className="fill-primary stroke-primary-foreground"
-                      strokeWidth="2"
-                    />
-                    <circle cx="200" cy="200" r="4" className="fill-primary-foreground" />
+                    <circle r="5" className="fill-none stroke-green-500" strokeWidth="2" strokeDasharray="2 2" />
+                    <line x1="-5" y1="0" x2="5" y2="0" className="stroke-green-500/50" />
+                    <line x1="0" y1="-5" x2="0" y2="5" className="stroke-green-500/50" />
                   </motion.g>
 
-                  {/* Target indicator */}
-                  <motion.circle
-                    cx={200 + targetX - 150}
-                    cy={350 - targetY}
-                    r="6"
-                    className="fill-none stroke-primary/50"
-                    strokeWidth="2"
-                    strokeDasharray="4 2"
-                    initial={false}
+                  {/* Línea guía fantasma al objetivo */}
+                  <motion.line
                     animate={{
-                      cx: 200 + (targetX - 150) * 0.8,
-                      cy: 350 - targetY * 0.8,
+                      x1: jointPositions.endX,
+                      y1: jointPositions.endY,
+                      x2: 200 + targetX,
+                      y2: 350 - targetY
                     }}
+                    stroke="rgba(0, 255, 0, 0.2)"
+                    strokeWidth="1"
+                    strokeDasharray="4 4"
                   />
+
                 </svg>
               </CardContent>
             </Card>
           </motion.div>
 
-          {/* Controls and Data */}
+          {/* CONTROLES */}
           <motion.div
             initial={{ opacity: 0, x: 20 }}
             whileInView={{ opacity: 1, x: 0 }}
@@ -273,73 +246,69 @@ export function KinematicsSimulator() {
             transition={{ duration: 0.6, delay: 0.2 }}
             className="space-y-6"
           >
-            {/* Sliders */}
             <Card>
               <CardHeader>
-                <CardTitle>Controles de Posición</CardTitle>
-                <CardDescription>Ajusta las coordenadas del efector final</CardDescription>
+                <CardTitle>Control de Coordenadas</CardTitle>
+                <CardDescription>Cinemática Inversa (X, Y → Ángulos)</CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
+                {/* Slider X */}
                 <div className="space-y-3">
                   <div className="flex justify-between items-center">
-                    <label className="text-sm font-medium">Eje X (Alcance)</label>
+                    <label className="text-sm font-medium">Distancia X (Alcance)</label>
                     <span className="font-mono text-sm text-primary">{targetX} mm</span>
                   </div>
                   <Slider
                     value={[targetX]}
-                    onValueChange={(value) => setTargetX(value[0])}
-                    min={50}
+                    onValueChange={(v) => setTargetX(v[0])}
+                    min={-200} // Permitir ir hacia atrás
                     max={250}
                     step={1}
-                    className="w-full"
                   />
                 </div>
+
+                {/* Slider Y */}
                 <div className="space-y-3">
                   <div className="flex justify-between items-center">
-                    <label className="text-sm font-medium">Eje Y (Altura)</label>
+                    <label className="text-sm font-medium">Altura Y (desde el suelo)</label>
                     <span className="font-mono text-sm text-primary">{targetY} mm</span>
                   </div>
                   <Slider
                     value={[targetY]}
-                    onValueChange={(value) => setTargetY(value[0])}
-                    min={50}
-                    max={300}
+                    onValueChange={(v) => setTargetY(v[0])}
+                    min={0}
+                    max={350}
                     step={1}
-                    className="w-full"
                   />
                 </div>
               </CardContent>
             </Card>
 
-            {/* Calculated Angles */}
-            <Card>
-              <CardHeader>
-                <CardTitle>Ángulos Calculados</CardTitle>
-                <CardDescription>Resultado de la cinemática inversa</CardDescription>
+            {/* Resultados Numéricos */}
+            <Card className="bg-secondary/20">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-lg">Datos del Robot</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="grid grid-cols-3 gap-4">
-                  <div className="text-center p-4 rounded-lg bg-secondary">
-                    <p className="text-xs text-muted-foreground mb-1">Ángulo Base</p>
-                    <p className="font-mono text-2xl text-primary">{angles.base.toFixed(1)}°</p>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="p-3 bg-background rounded border">
+                    <p className="text-xs text-muted-foreground">Theta 1 (Hombro)</p>
+                    <p className="text-xl font-mono font-bold text-blue-500">
+                      {ikResult.shoulderDeg.toFixed(1)}°
+                    </p>
                   </div>
-                  <div className="text-center p-4 rounded-lg bg-secondary">
-                    <p className="text-xs text-muted-foreground mb-1">Ángulo Hombro</p>
-                    <p className="font-mono text-2xl text-primary">{angles.shoulder.toFixed(1)}°</p>
-                  </div>
-                  <div className="text-center p-4 rounded-lg bg-secondary">
-                    <p className="text-xs text-muted-foreground mb-1">Ángulo Codo</p>
-                    <p className="font-mono text-2xl text-primary">{angles.elbow.toFixed(1)}°</p>
+                  <div className="p-3 bg-background rounded border">
+                    <p className="text-xs text-muted-foreground">Theta 2 (Codo)</p>
+                    <p className="text-xl font-mono font-bold text-indigo-500">
+                      {ikResult.elbowDeg.toFixed(1)}°
+                    </p>
                   </div>
                 </div>
-              </CardContent>
-            </Card>
-
-            {/* Formula */}
-            <Card className="border-primary/30">
-              <CardContent className="py-4">
-                <p className="text-xs text-muted-foreground mb-2">Fórmula de Cinemática Inversa:</p>
-                <code className="text-sm font-mono text-primary">θ₂ = arccos((x² + y² - L₂² - L₃²) / 2L₂L₃)</code>
+                <div className="mt-4 text-xs font-mono text-muted-foreground">
+                  <p>L1 (Base): {L1}mm</p>
+                  <p>L2 (Brazo): {L2}mm</p>
+                  <p>L3 (Antebrazo): {L3}mm</p>
+                </div>
               </CardContent>
             </Card>
           </motion.div>

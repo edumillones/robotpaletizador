@@ -1,709 +1,436 @@
 "use client"
 
-import { useState, useCallback, useMemo, useEffect, useRef } from "react"
-import { motion } from "framer-motion"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { useState, useCallback, useMemo, useRef } from "react"
+import { motion, AnimatePresence } from "framer-motion"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Play, RotateCcw, Package, Layers } from "lucide-react"
+import { Play, RotateCcw, Box, RefreshCw, AlertCircle, ArrowRightLeft } from "lucide-react"
 
-// Robot arm segment lengths
-const L1 = 80
-const L2 = 100
-const L3 = 100
+// --- DIMENSIONES MECÁNICAS ---
+const L1 = 80   // Base (Pedestal fijo)
+const L2 = 120  // Eslabón Hombro
+const L3 = 110  // Eslabón Codo
 
-const GROUND_LEVEL = 20 // Y coordinate where the floor is (in arm coordinate system, lower Y = lower position)
-const FORK_OFFSET = 25 // Visual offset so forks appear just above ground
-const PALLET_HEIGHT = 40 // Height of pallet surface above ground
+// --- COORDENADAS CILÍNDRICAS (R, Y, Theta) ---
+// R: Radio (Distancia del centro)
+// Y: Altura
+// Theta: Ángulo de la base
 
-// Scene positions - recalculated for proper ground-level interaction
-const HOME_POS = { x: 150, y: 180 }
-const BAG_X = 80 // X position of bag origin
-const PALLET_X = 280 // X position of pallet
+const HOME_POS = { r: 100, y: 150, theta: 0 } 
+const SUGAR_POS = { r: 160, y: 15, theta: -45 }  // Zona Carga (Izquierda)
+const PALLET_POS = { r: 160, y: 50, theta: 45 }  // Zona Descarga (Derecha)
 
-const APPROACH_X = BAG_X - 30 // Position before scooping (left of bag)
-const LIFT_HEIGHT = 160 // Height when transporting
+const SAFE_HEIGHT = 180 // Altura de seguridad para viajar
 
-type CycleState =
-  | "idle"
-  | "pre_position"
-  | "lowering_to_floor"
-  | "scooping"
-  | "lifting"
-  | "traveling_to_pallet"
-  | "lowering_to_pallet"
-  | "retracting"
-  | "returning"
-  | "complete"
+type CycleState = 
+  | "idle" 
+  | "start_sequence"
+  | "rotate_to_sugar" | "descend_sugar" | "grab_sugar" | "lift_sugar" 
+  | "rotate_to_pallet" 
+  | "descend_pallet" | "drop_sugar" | "lift_pallet" | "return_home"
 
 const stateLabels: Record<CycleState, string> = {
-  idle: "Esperando",
-  pre_position: "Pre-posicionando",
-  lowering_to_floor: "Descendiendo al piso",
-  scooping: "Insertando horquilla",
-  lifting: "Elevando carga",
-  traveling_to_pallet: "Trasladando a pallet",
-  lowering_to_pallet: "Descendiendo a pallet",
-  retracting: "Retrayendo horquilla",
-  returning: "Regresando a inicio",
-  complete: "Ciclo completado",
+  idle: "Sistema Listo",
+  start_sequence: "Iniciando Secuencia...",
+  rotate_to_sugar: "Girando a Zona Carga (-45°)",
+  descend_sugar: "Aproximando a Mesa",
+  grab_sugar: "Sujetando Bolsa",
+  lift_sugar: "Elevando Carga",
+  rotate_to_pallet: "Girando a Pallet (+45°)",
+  descend_pallet: "Posicionando Descarga",
+  drop_sugar: "Liberando Carga",
+  lift_pallet: "Retirada Segura",
+  return_home: "Regresando a Home",
 }
 
 export function PalletizingDemo() {
   const [cycleState, setCycleState] = useState<CycleState>("idle")
-  const [targetPos, setTargetPos] = useState(HOME_POS)
-  const [isCarrying, setIsCarrying] = useState(false)
-  const [bagDropped, setBagDropped] = useState(false)
-  const [bagFinalPos, setBagFinalPos] = useState({ x: BAG_X, y: 0 })
-  const [floorReached, setFloorReached] = useState(false)
-  const [actionLog, setActionLog] = useState("Sistema listo. Presione iniciar.")
+  
+  // Estado del Robot (Posición Actual)
+  const [currentPos, setCurrentPos] = useState(HOME_POS)
+  
+  // Estado del Gripper y Bolsa
+  const [isGripping, setIsGripping] = useState(false)
+  const [bagLocation, setBagLocation] = useState<"origin" | "gripper" | "pallet">("origin")
+  
   const timeoutRef = useRef<NodeJS.Timeout | null>(null)
 
-  // Inverse kinematics calculation
-  const calculateAngles = useCallback((x: number, y: number) => {
-    const dist = Math.sqrt(x * x + y * y)
+  // --- 1. CINEMÁTICA INVERSA (IK) ---
+  const calculateIK = useCallback((r: number, y: number) => {
+    const dy = y - L1 
+    const dx = r 
+    const dist = Math.sqrt(dx * dx + dy * dy)
+    
+    // Limits Check & Scaling
     const maxReach = L2 + L3
-    const minReach = Math.abs(L2 - L3)
+    let safeR = dx
+    let safeY = dy
 
-    let adjX = x
-    let adjY = y
-
-    if (dist > maxReach || dist < minReach) {
-      const scale = dist > maxReach ? maxReach / dist : minReach / dist
-      adjX = x * scale * 0.95
-      adjY = y * scale * 0.95
+    if (dist > maxReach * 0.99) {
+       const scale = (maxReach * 0.99) / dist
+       safeR = dx * scale
+       safeY = dy * scale
     }
 
-    const baseAngle = Math.atan2(adjX, adjY)
-    const r = Math.sqrt(adjX * adjX + adjY * adjY)
-    const cosElbow = (r * r - L2 * L2 - L3 * L3) / (2 * L2 * L3)
-    const clampedCosElbow = Math.max(-1, Math.min(1, cosElbow))
-    const elbowAngle = Math.acos(clampedCosElbow)
-    const shoulderAngle = Math.atan2(adjY, adjX) - Math.atan2(L3 * Math.sin(elbowAngle), L2 + L3 * Math.cos(elbowAngle))
+    // Ley de cosenos (Codo Arriba)
+    const h = Math.sqrt(safeR * safeR + safeY * safeY)
+    if (h < 1) return { shoulder: 90, elbow: 0 } 
+
+    const cosElbow = (h * h - L2 * L2 - L3 * L3) / (2 * L2 * L3)
+    const elbowRad = -Math.acos(Math.max(-1, Math.min(1, cosElbow)))
+
+    const alpha = Math.atan2(safeY, safeR)
+    const beta = Math.atan2(L3 * Math.sin(elbowRad), L2 + L3 * Math.cos(elbowRad))
+    const shoulderRad = alpha - beta
 
     return {
-      base: (baseAngle * 180) / Math.PI,
-      shoulder: (shoulderAngle * 180) / Math.PI,
-      elbow: (elbowAngle * 180) / Math.PI,
+      shoulder: (shoulderRad * 180) / Math.PI,
+      elbow: (elbowRad * 180) / Math.PI
     }
   }, [])
 
-  const angles = useMemo(() => calculateAngles(targetPos.x, targetPos.y), [targetPos, calculateAngles])
+  const angles = useMemo(() => calculateIK(currentPos.r, currentPos.y), [currentPos, calculateIK])
 
-  // Calculate joint positions for SVG
-  const jointPositions = useMemo(() => {
-    const shoulderRad = (angles.shoulder * Math.PI) / 180
-    const elbowRad = (angles.elbow * Math.PI) / 180
+  // --- 2. CINEMÁTICA VISUAL (SVG) ---
+  const jointPos = useMemo(() => {
+    const sRad = (angles.shoulder * Math.PI) / 180
+    const eRad = (angles.elbow * Math.PI) / 180
 
-    const baseX = 180
-    const baseY = 320
+    const originX = 80 // Movemos el robot a la izquierda para tener espacio a la derecha
+    const originY = 320 
 
-    const shoulderX = baseX
-    const shoulderY = baseY - L1
+    const shX = originX
+    const shY = originY - L1
 
-    const elbowX = shoulderX + L2 * Math.cos(Math.PI / 2 - shoulderRad)
-    const elbowY = shoulderY - L2 * Math.sin(Math.PI / 2 - shoulderRad)
+    const elX = shX + L2 * Math.cos(sRad)
+    const elY = shY - L2 * Math.sin(sRad)
 
-    const combinedAngle = shoulderRad - (Math.PI - elbowRad)
-    const endX = elbowX + L3 * Math.cos(Math.PI / 2 - combinedAngle)
-    const endY = elbowY - L3 * Math.sin(Math.PI / 2 - combinedAngle)
+    const absElbow = sRad + eRad
+    const eeX = elX + L3 * Math.cos(absElbow)
+    const eeY = elY - L3 * Math.sin(absElbow)
 
-    return { baseX, baseY, shoulderX, shoulderY, elbowX, elbowY, endX, endY }
+    return { originX, originY, shX, shY, elX, elY, eeX, eeY }
   }, [angles])
 
-  const runCycle = useCallback(() => {
-    const sequence: {
-      state: CycleState
-      pos: { x: number; y: number }
-      carrying: boolean
-      delay: number
-      floor: boolean
+  // --- 3. SECUENCIA DE AUTOMATIZACIÓN ---
+  const runSequence = useCallback(() => {
+    // Definimos tiempos y posiciones clave
+    const steps: { 
+      state: CycleState, 
+      pos: typeof HOME_POS, 
+      grip: boolean, 
+      time: number,
+      action?: () => void 
     }[] = [
-      // Step 1: Pre-position - hover above and left of bag
-      {
-        state: "pre_position",
-        pos: { x: APPROACH_X, y: GROUND_LEVEL + FORK_OFFSET + 60 },
-        carrying: false,
-        delay: 800,
-        floor: false,
-      },
-      // Step 2: Lower to floor level - forks at ground
-      {
-        state: "lowering_to_floor",
-        pos: { x: APPROACH_X, y: GROUND_LEVEL + FORK_OFFSET },
-        carrying: false,
-        delay: 700,
-        floor: true,
-      },
-      // Step 3: Scoop - slide forks under bag horizontally
-      {
-        state: "scooping",
-        pos: { x: BAG_X + 15, y: GROUND_LEVEL + FORK_OFFSET },
-        carrying: true, // CRITICAL: Attach bag here
-        delay: 900,
-        floor: true,
-      },
-      // Step 4: Lift with bag (slower - loaded)
-      {
-        state: "lifting",
-        pos: { x: BAG_X + 15, y: LIFT_HEIGHT },
-        carrying: true,
-        delay: 1000,
-        floor: false,
-      },
-      // Step 5: Travel horizontally to pallet (base rotation simulation)
-      {
-        state: "traveling_to_pallet",
-        pos: { x: PALLET_X, y: LIFT_HEIGHT },
-        carrying: true,
-        delay: 1200,
-        floor: false,
-      },
-      // Step 6: Lower to pallet height
-      {
-        state: "lowering_to_pallet",
-        pos: { x: PALLET_X, y: GROUND_LEVEL + PALLET_HEIGHT + FORK_OFFSET },
-        carrying: true,
-        delay: 1000,
-        floor: false,
-      },
-      // Step 7: Retract forks - pull out horizontally, bag stays
-      {
-        state: "retracting",
-        pos: { x: PALLET_X - 40, y: GROUND_LEVEL + PALLET_HEIGHT + FORK_OFFSET },
-        carrying: false, // CRITICAL: Detach bag here
-        delay: 800,
-        floor: false,
-      },
-      // Step 8: Return home
-      {
-        state: "returning",
-        pos: HOME_POS,
-        carrying: false,
-        delay: 900,
-        floor: false,
-      },
-      { state: "complete", pos: HOME_POS, carrying: false, delay: 0, floor: false },
+      // 1. Ir a Home primero (Reset visual)
+      { state: "start_sequence", pos: HOME_POS, grip: false, time: 800 },
+      
+      // 2. GIRO: Rotar hacia la bolsa (-45°) MANTENIENDO ALTURA
+      { state: "rotate_to_sugar", pos: { ...SUGAR_POS, y: SAFE_HEIGHT }, grip: false, time: 1200 },
+      
+      // 3. BAJAR: Descender verticalmente sobre la bolsa
+      { state: "descend_sugar", pos: SUGAR_POS, grip: false, time: 800 },
+      
+      // 4. AGARRAR: Activar solenoide (Sin moverse)
+      { state: "grab_sugar", pos: SUGAR_POS, grip: true, time: 500, action: () => setBagLocation("gripper") },
+      
+      // 5. SUBIR: Elevar con carga
+      { state: "lift_sugar", pos: { ...SUGAR_POS, y: SAFE_HEIGHT }, grip: true, time: 800 },
+      
+      // 6. GIRO LARGO: Rotar hacia el pallet (+45°)
+      { state: "rotate_to_pallet", pos: { ...PALLET_POS, y: SAFE_HEIGHT }, grip: true, time: 1500 },
+      
+      // 7. BAJAR: Posicionar sobre pallet
+      { state: "descend_pallet", pos: PALLET_POS, grip: true, time: 800 },
+      
+      // 8. SOLTAR: Desactivar gripper
+      { state: "drop_sugar", pos: PALLET_POS, grip: false, time: 500, action: () => setBagLocation("pallet") },
+      
+      // 9. SUBIR VACÍO
+      { state: "lift_pallet", pos: { ...PALLET_POS, y: SAFE_HEIGHT }, grip: false, time: 800 },
+      
+      // 10. RETORNO: Volver a 0°
+      { state: "return_home", pos: HOME_POS, grip: false, time: 1000 },
+      
+      { state: "idle", pos: HOME_POS, grip: false, time: 0 },
     ]
 
-    let currentStep = 0
-
-    const executeStep = () => {
-      if (currentStep >= sequence.length) return
-
-      const step = sequence[currentStep]
+    let stepIdx = 0
+    const execute = () => {
+      if (stepIdx >= steps.length) return
+      const step = steps[stepIdx]
+      
       setCycleState(step.state)
-      setTargetPos(step.pos)
-      setFloorReached(step.floor)
+      setCurrentPos(step.pos)
+      setIsGripping(step.grip)
+      if (step.action) step.action()
 
-      if (step.carrying && !isCarrying) {
-        setIsCarrying(true) // Attach bag to gripper
-      }
-      if (!step.carrying && currentStep > 0 && sequence[currentStep - 1]?.carrying) {
-        // Detaching - save bag position at pallet
-        setIsCarrying(false)
-        setBagDropped(true)
-        setBagFinalPos({ x: PALLET_X, y: PALLET_HEIGHT })
-      }
-
-      setActionLog(`Acción: ${stateLabels[step.state]} → X:${step.pos.x.toFixed(0)} Y:${step.pos.y.toFixed(0)}`)
-
-      currentStep++
-      if (currentStep < sequence.length) {
-        timeoutRef.current = setTimeout(executeStep, step.delay)
+      stepIdx++
+      if (stepIdx < steps.length) {
+        timeoutRef.current = setTimeout(execute, step.time)
       }
     }
-
-    executeStep()
-  }, [isCarrying])
-
-  const startCycle = () => {
-    if (cycleState !== "idle" && cycleState !== "complete") return
-    // Reset states
-    setIsCarrying(false)
-    setBagDropped(false)
-    setBagFinalPos({ x: BAG_X, y: 0 })
-    setFloorReached(false)
-    setCycleState("idle")
-    setTimeout(() => runCycle(), 100)
-  }
-
-  const resetCycle = () => {
-    if (timeoutRef.current) clearTimeout(timeoutRef.current)
-    setCycleState("idle")
-    setTargetPos(HOME_POS)
-    setIsCarrying(false)
-    setBagDropped(false)
-    setBagFinalPos({ x: BAG_X, y: 0 })
-    setFloorReached(false)
-    setActionLog("Sistema reiniciado. Listo para iniciar.")
-  }
-
-  // Cleanup
-  useEffect(() => {
-    return () => {
-      if (timeoutRef.current) clearTimeout(timeoutRef.current)
-    }
+    execute()
   }, [])
 
-  const isRunning = cycleState !== "idle" && cycleState !== "complete"
+  const start = () => {
+    if (cycleState !== "idle") return
+    setBagLocation("origin")
+    runSequence()
+  }
 
-  const bagSvgPos = useMemo(() => {
-    if (bagDropped) {
-      // Bag is on pallet - fixed position
-      return { x: PALLET_X + 15, y: 278 } // On top of pallet
+  const reset = () => {
+    if (timeoutRef.current) clearTimeout(timeoutRef.current)
+    setCycleState("idle")
+    setCurrentPos(HOME_POS)
+    setIsGripping(false)
+    setBagLocation("origin")
+  }
+
+  // --- LÓGICA DE VISIBILIDAD DE OBJETOS (CÁMARA INTELIGENTE) ---
+  // Solo mostramos el objeto "estático" si el robot está mirando hacia su zona.
+  // Esto evita el "teletransporte visual".
+  
+  // Posición visual en X de los objetos (Basada en su Radio R=160)
+  // OrigenX (80) + Radio (160) = 240
+  const visualTargetX = 80 + 160 
+
+  const showSugarStand = currentPos.theta < -10 // Visible solo si miramos a la izquierda (< -10°)
+  const showPallet = currentPos.theta > 10     // Visible solo si miramos a la derecha (> 10°)
+
+  // Posición de la bolsa
+  const bagRenderPos = useMemo(() => {
+    if (bagLocation === "gripper") {
+        return { x: jointPos.eeX, y: jointPos.eeY + 15, opacity: 1, rotate: 0 }
     }
-    if (isCarrying) {
-      // Bag follows the gripper end effector
-      return { x: jointPositions.endX + 25, y: jointPositions.endY - 25 }
+    if (bagLocation === "origin") {
+        // Coordenada exacta del 'SUGAR_POS' visual
+        return { x: visualTargetX, y: 320 - SUGAR_POS.y + 15, opacity: showSugarStand ? 1 : 0, rotate: 0 }
     }
-    // Bag at origin
-    return { x: BAG_X, y: 300 }
-  }, [isCarrying, bagDropped, jointPositions.endX, jointPositions.endY])
+    if (bagLocation === "pallet") {
+        // Coordenada exacta del 'PALLET_POS' visual
+        return { x: visualTargetX, y: 320 - PALLET_POS.y - 10, opacity: showPallet ? 1 : 0, rotate: 0 }
+    }
+    return { x: 0, y: 0, opacity: 0, rotate: 0 }
+  }, [bagLocation, jointPos.eeX, jointPos.eeY, showSugarStand, showPallet, visualTargetX])
 
   return (
-    <section id="demo-ciclo" className="py-20 px-4">
-      <div className="max-w-6xl mx-auto">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          whileInView={{ opacity: 1, y: 0 }}
-          viewport={{ once: true }}
-          transition={{ duration: 0.6 }}
-          className="text-center mb-12"
-        >
-          <Badge variant="outline" className="mb-4 border-primary/50 text-primary">
-            <Layers className="w-4 h-4 mr-2" />
-            Demostración
-          </Badge>
-          <h2 className="text-3xl md:text-4xl font-bold mb-4">Ciclo Automático de Paletizado</h2>
-          <p className="text-muted-foreground max-w-2xl mx-auto">
-            Observa cómo el brazo robótico ejecuta un ciclo completo: desciende al piso, inserta la horquilla bajo la
-            bolsa, y la transporta al pallet
-          </p>
-        </motion.div>
+    <div className="w-full bg-slate-950 p-6 rounded-xl border border-slate-900 text-slate-200">
+      
+      {/* Header */}
+      <div className="flex justify-between items-center mb-6">
+        <div>
+            <h2 className="text-xl font-bold flex items-center gap-2 text-white">
+                <Box className="text-blue-500" /> 
+                Paletizador 3-Ejes v2.0
+            </h2>
+            <p className="text-slate-400 text-sm">Simulación con Rotación y Perspectiva Corregida</p>
+        </div>
+        <Badge variant="outline" className={`${cycleState !== "idle" ? "bg-blue-900/20 text-blue-400 border-blue-800 animate-pulse" : "text-slate-500"}`}>
+            {stateLabels[cycleState]}
+        </Badge>
+      </div>
 
-        <div className="grid lg:grid-cols-2 gap-8">
-          {/* SVG Visualization */}
-          <motion.div
-            initial={{ opacity: 0, scale: 0.95 }}
-            whileInView={{ opacity: 1, scale: 1 }}
-            viewport={{ once: true }}
-            transition={{ duration: 0.6 }}
-          >
-            <Card className="overflow-hidden">
-              <CardContent className="p-0">
-                <svg viewBox="0 0 400 380" className="w-full h-auto bg-card" style={{ maxHeight: "420px" }}>
-                  {/* Grid */}
-                  <defs>
-                    <pattern id="grid-demo" width="20" height="20" patternUnits="userSpaceOnUse">
-                      <path
-                        d="M 20 0 L 0 0 0 20"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="0.5"
-                        className="text-primary/10"
-                      />
-                    </pattern>
-                  </defs>
-                  <rect width="400" height="380" fill="url(#grid-demo)" />
+      <div className="grid lg:grid-cols-3 gap-6">
+        
+        {/* --- VISTA LATERAL (SVG) --- */}
+        <Card className="lg:col-span-2 bg-slate-900 border-slate-800 overflow-hidden relative shadow-inner shadow-black/50">
+            <div className="absolute top-3 left-3 z-10 bg-slate-950/80 backdrop-blur px-2 py-1 rounded border border-slate-800 text-[10px] text-slate-400 font-mono">
+                CÁMARA: VISTA RADIAL (R-Y)
+            </div>
+            
+            <CardContent className="p-0">
+                <svg viewBox="0 0 400 350" className="w-full h-[400px]">
+                    <defs>
+                        <pattern id="grid2" width="40" height="40" patternUnits="userSpaceOnUse">
+                            <path d="M 40 0 L 0 0 0 40" fill="none" stroke="rgba(255,255,255,0.03)" strokeWidth="1"/>
+                        </pattern>
+                    </defs>
+                    <rect width="400" height="350" fill="url(#grid2)" />
+                    
+                    {/* SUELO */}
+                    <line x1="0" y1="320" x2="400" y2="320" stroke="#334155" strokeWidth="2" />
 
-                  {/* Ground line */}
-                  <line x1="0" y1="340" x2="400" y2="340" className="stroke-muted-foreground/30" strokeWidth="2" />
-                  <text x="10" y="355" className="fill-muted-foreground/50 text-[9px] font-mono">
-                    PISO (Y=0)
-                  </text>
+                    {/* OBJETOS FANTASMA (Solo visibles según ángulo) */}
+                    
+                    {/* MESA DE CARGA (Visible si theta < 0) */}
+                    <AnimatePresence>
+                        {showSugarStand && (
+                            <motion.g 
+                                initial={{ opacity: 0 }} 
+                                animate={{ opacity: 1 }} 
+                                exit={{ opacity: 0 }}
+                                transition={{ duration: 0.3 }}
+                            >
+                                <rect x={visualTargetX - 20} y="305" width="40" height="15" className="fill-slate-700 stroke-slate-600" />
+                                <text x={visualTargetX} y="340" textAnchor="middle" className="text-[10px] fill-slate-500 font-mono">ZONA CARGA</text>
+                            </motion.g>
+                        )}
+                    </AnimatePresence>
 
-                  {/* Pallet */}
-                  <g>
-                    <rect
-                      x="240"
-                      y="300"
-                      width="100"
-                      height="40"
-                      rx="2"
-                      className="fill-amber-900/60 stroke-amber-700"
-                      strokeWidth="1.5"
+                    {/* PALLET (Visible si theta > 0) */}
+                    <AnimatePresence>
+                        {showPallet && (
+                            <motion.g 
+                                initial={{ opacity: 0 }} 
+                                animate={{ opacity: 1 }} 
+                                exit={{ opacity: 0 }}
+                                transition={{ duration: 0.3 }}
+                            >
+                                <rect x={visualTargetX - 40} y={320 - PALLET_POS.y} width="80" height={PALLET_POS.y} className="fill-amber-900/30 stroke-amber-800" rx="2" />
+                                <text x={visualTargetX} y="340" textAnchor="middle" className="text-[10px] fill-amber-700 font-mono">PALLET</text>
+                            </motion.g>
+                        )}
+                    </AnimatePresence>
+
+
+                    {/* ROBOT */}
+                    {/* Base */}
+                    <rect x={jointPos.originX - 15} y={jointPos.shY} width="30" height={L1} className="fill-slate-800 stroke-slate-600" strokeWidth="2" />
+                    
+                    {/* Brazos */}
+                    <motion.line 
+                        animate={{ x1: jointPos.shX, y1: jointPos.shY, x2: jointPos.elX, y2: jointPos.elY }}
+                        transition={{ type: "spring", stiffness: 100, damping: 25 }}
+                        className="stroke-blue-600" strokeWidth="12" strokeLinecap="round" 
                     />
-                    {/* Fork slots on pallet */}
-                    <rect x="250" y="300" width="10" height="6" className="fill-amber-950/80" />
-                    <rect x="275" y="300" width="10" height="6" className="fill-amber-950/80" />
-                    <rect x="300" y="300" width="10" height="6" className="fill-amber-950/80" />
-                    {/* Pallet slats */}
-                    <line x1="265" y1="308" x2="265" y2="340" className="stroke-amber-700/50" strokeWidth="1" />
-                    <line x1="290" y1="308" x2="290" y2="340" className="stroke-amber-700/50" strokeWidth="1" />
-                    <line x1="315" y1="308" x2="315" y2="340" className="stroke-amber-700/50" strokeWidth="1" />
-                    <text x="290" y="358" textAnchor="middle" className="fill-muted-foreground text-xs font-mono">
-                      PALLET
-                    </text>
-                  </g>
-
-                  {/* Origin zone marker */}
-                  {!bagDropped && !isCarrying && (
-                    <g>
-                      <rect
-                        x={BAG_X - 25}
-                        y="330"
-                        width="50"
-                        height="10"
-                        rx="2"
-                        className="fill-primary/10 stroke-primary/30"
-                        strokeWidth="1"
-                        strokeDasharray="3,3"
-                      />
-                      <text x={BAG_X} y="358" textAnchor="middle" className="fill-muted-foreground text-xs font-mono">
-                        ORIGEN
-                      </text>
-                    </g>
-                  )}
-
-                  <motion.g
-                    animate={{
-                      x: bagSvgPos.x - BAG_X,
-                      y: bagSvgPos.y - 300,
-                    }}
-                    transition={{
-                      type: "spring",
-                      stiffness: isCarrying ? 60 : 120,
-                      damping: isCarrying ? 25 : 20,
-                    }}
-                  >
-                    {/* Bag body - rounded sack shape */}
-                    <ellipse
-                      cx={BAG_X}
-                      cy="300"
-                      rx="20"
-                      ry="24"
-                      className="fill-amber-100 stroke-amber-300"
-                      strokeWidth="2"
-                    />
-                    {/* Bag tie/top */}
-                    <rect
-                      x={BAG_X - 7}
-                      y="274"
-                      width="14"
-                      height="7"
-                      rx="2"
-                      className="fill-amber-200 stroke-amber-400"
-                      strokeWidth="1"
-                    />
-                    {/* Bag texture lines */}
-                    <path
-                      d={`M ${BAG_X - 12} 295 Q ${BAG_X} 290 ${BAG_X + 12} 295`}
-                      className="stroke-amber-300/60"
-                      strokeWidth="1"
-                      fill="none"
-                    />
-                    <path
-                      d={`M ${BAG_X - 10} 310 Q ${BAG_X} 305 ${BAG_X + 10} 310`}
-                      className="stroke-amber-300/60"
-                      strokeWidth="1"
-                      fill="none"
-                    />
-                    <text x={BAG_X} y="303" textAnchor="middle" className="fill-amber-700 text-[9px] font-bold">
-                      1 kg
-                    </text>
-                    {/* Bag label */}
-                    {!isCarrying && !bagDropped && (
-                      <text
-                        x={BAG_X}
-                        y="340"
-                        textAnchor="middle"
-                        className="fill-amber-500 text-[10px] font-mono font-semibold"
-                      >
-                        BOLSA
-                      </text>
-                    )}
-                  </motion.g>
-
-                  {/* Base platform */}
-                  <rect
-                    x={jointPositions.baseX - 35}
-                    y={jointPositions.baseY}
-                    width="70"
-                    height="18"
-                    rx="3"
-                    className="fill-muted stroke-primary"
-                    strokeWidth="2"
-                  />
-
-                  {/* Arm segments - slower transition when loaded */}
-                  <motion.line
-                    x1={jointPositions.baseX}
-                    y1={jointPositions.baseY}
-                    x2={jointPositions.shoulderX}
-                    y2={jointPositions.shoulderY}
-                    className="stroke-muted-foreground"
-                    strokeWidth="10"
-                    strokeLinecap="round"
-                    animate={{
-                      x2: jointPositions.shoulderX,
-                      y2: jointPositions.shoulderY,
-                    }}
-                    transition={{ type: "spring", stiffness: isCarrying ? 50 : 80, damping: isCarrying ? 22 : 18 }}
-                  />
-
-                  <motion.line
-                    x1={jointPositions.shoulderX}
-                    y1={jointPositions.shoulderY}
-                    x2={jointPositions.elbowX}
-                    y2={jointPositions.elbowY}
-                    className="stroke-primary"
-                    strokeWidth="8"
-                    strokeLinecap="round"
-                    animate={{
-                      x1: jointPositions.shoulderX,
-                      y1: jointPositions.shoulderY,
-                      x2: jointPositions.elbowX,
-                      y2: jointPositions.elbowY,
-                    }}
-                    transition={{ type: "spring", stiffness: isCarrying ? 50 : 80, damping: isCarrying ? 22 : 18 }}
-                  />
-
-                  <motion.line
-                    x1={jointPositions.elbowX}
-                    y1={jointPositions.elbowY}
-                    x2={jointPositions.endX}
-                    y2={jointPositions.endY}
-                    className="stroke-primary/70"
-                    strokeWidth="6"
-                    strokeLinecap="round"
-                    animate={{
-                      x1: jointPositions.elbowX,
-                      y1: jointPositions.elbowY,
-                      x2: jointPositions.endX,
-                      y2: jointPositions.endY,
-                    }}
-                    transition={{ type: "spring", stiffness: isCarrying ? 50 : 80, damping: isCarrying ? 22 : 18 }}
-                  />
-
-                  {/* Joints */}
-                  <circle
-                    cx={jointPositions.baseX}
-                    cy={jointPositions.baseY}
-                    r="7"
-                    className="fill-secondary stroke-primary"
-                    strokeWidth="2"
-                  />
-                  <motion.circle
-                    r="6"
-                    className="fill-secondary stroke-primary"
-                    strokeWidth="2"
-                    animate={{
-                      cx: jointPositions.shoulderX,
-                      cy: jointPositions.shoulderY,
-                    }}
-                    transition={{ type: "spring", stiffness: isCarrying ? 50 : 80, damping: isCarrying ? 22 : 18 }}
-                  />
-                  <motion.circle
-                    r="5"
-                    className="fill-secondary stroke-primary"
-                    strokeWidth="2"
-                    animate={{
-                      cx: jointPositions.elbowX,
-                      cy: jointPositions.elbowY,
-                    }}
-                    transition={{ type: "spring", stiffness: isCarrying ? 50 : 80, damping: isCarrying ? 22 : 18 }}
-                  />
-
-                  {/* Gripper / Fork assembly */}
-                  <motion.g
-                    animate={{
-                      x: jointPositions.endX - 180,
-                      y: jointPositions.endY - 240,
-                    }}
-                    transition={{ type: "spring", stiffness: isCarrying ? 50 : 80, damping: isCarrying ? 22 : 18 }}
-                  >
-                    {/* Wrist mount */}
-                    <rect
-                      x="175"
-                      y="232"
-                      width="12"
-                      height="18"
-                      rx="2"
-                      className="fill-primary stroke-primary-foreground"
-                      strokeWidth="1"
+                    <motion.line 
+                        animate={{ x1: jointPos.elX, y1: jointPos.elY, x2: jointPos.eeX, y2: jointPos.eeY }}
+                        transition={{ type: "spring", stiffness: 100, damping: 25 }}
+                        className="stroke-blue-400" strokeWidth="10" strokeLinecap="round" 
                     />
 
-                    {/* Fork base plate */}
-                    <rect
-                      x="172"
-                      y="250"
-                      width="18"
-                      height="8"
-                      rx="1"
-                      className="fill-zinc-600 stroke-zinc-500"
-                      strokeWidth="1"
-                    />
+                    {/* Joints */}
+                    <circle cx={jointPos.shX} cy={jointPos.shY} r="5" className="fill-white" />
+                    <motion.circle animate={{ cx: jointPos.elX, cy: jointPos.elY }} transition={{ type: "spring", stiffness: 100, damping: 25 }} r="4" className="fill-white" />
 
-                    {/* Fork tines - 3 horizontal prongs extending forward */}
-                    <rect
-                      x="190"
-                      y="250"
-                      width="35"
-                      height="5"
-                      rx="1"
-                      className="fill-zinc-500 stroke-zinc-400"
-                      strokeWidth="0.5"
-                    />
-                    <rect
-                      x="190"
-                      y="242"
-                      width="35"
-                      height="5"
-                      rx="1"
-                      className="fill-zinc-500 stroke-zinc-400"
-                      strokeWidth="0.5"
-                    />
-                    <rect
-                      x="190"
-                      y="258"
-                      width="35"
-                      height="5"
-                      rx="1"
-                      className="fill-zinc-500 stroke-zinc-400"
-                      strokeWidth="0.5"
-                    />
-
-                    {/* Tine tips */}
-                    <circle cx="225" cy="244.5" r="2.5" className="fill-zinc-400" />
-                    <circle cx="225" cy="252.5" r="2.5" className="fill-zinc-400" />
-                    <circle cx="225" cy="260.5" r="2.5" className="fill-zinc-400" />
-                  </motion.g>
-
-                  {floorReached && (
-                    <motion.g initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-                      <circle cx="30" cy="30" r="8" className="fill-green-500" />
-                      <text x="45" y="34" className="fill-green-400 text-[10px] font-mono font-bold">
-                        PISO ALCANZADO
-                      </text>
+                    {/* Gripper */}
+                    <motion.g animate={{ x: jointPos.eeX, y: jointPos.eeY }} transition={{ type: "spring", stiffness: 100, damping: 25 }}>
+                        <rect x="-8" y="-4" width="16" height="8" className="fill-slate-400" rx="1" />
+                        <line x1="-6" y1="4" x2="-6" y2="14" stroke={isGripping ? "red" : "white"} strokeWidth="2" />
+                        <line x1="6" y1="4" x2="6" y2="14" stroke={isGripping ? "red" : "white"} strokeWidth="2" />
                     </motion.g>
-                  )}
 
-                  {/* Load indicator when carrying */}
-                  {isCarrying && (
-                    <motion.g initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-                      <rect
-                        x="300"
-                        y="15"
-                        width="90"
-                        height="22"
-                        rx="4"
-                        className="fill-amber-600/20 stroke-amber-500"
-                        strokeWidth="1"
-                      />
-                      <text x="345" y="31" textAnchor="middle" className="fill-amber-400 text-xs font-mono font-bold">
-                        CARGA: 1kg
-                      </text>
+                    {/* BOLSA DE AZÚCAR (Elemento Único que se mueve) */}
+                    <motion.g
+                        animate={{ 
+                            x: bagRenderPos.x, 
+                            y: bagRenderPos.y, 
+                            opacity: bagRenderPos.opacity 
+                        }}
+                        transition={bagLocation === "gripper" 
+                            ? { type: "spring", stiffness: 100, damping: 25 } // Pegada al robot
+                            : { duration: 0 } // Teletransporte instantáneo solo cuando se oculta/muestra
+                        }
+                    >
+                         {/* Bolsa blanca */}
+                        <path d="M -12 0 L -10 -20 L 10 -20 L 12 0 Z" className="fill-slate-100 stroke-slate-300" strokeWidth="1" />
+                        <rect x="-8" y="-14" width="16" height="6" className="fill-blue-600" />
+                        <text x="0" y="-10" textAnchor="middle" className="text-[5px] fill-white font-bold">AZÚCAR</text>
                     </motion.g>
-                  )}
+
                 </svg>
-              </CardContent>
-            </Card>
-          </motion.div>
+            </CardContent>
 
-          {/* Controls and Data */}
-          <motion.div
-            initial={{ opacity: 0, x: 20 }}
-            whileInView={{ opacity: 1, x: 0 }}
-            viewport={{ once: true }}
-            transition={{ duration: 0.6, delay: 0.2 }}
-            className="space-y-6"
-          >
-            {/* Status */}
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="flex items-center gap-2">
-                  <Package className="w-5 h-5" />
-                  Estado del Sistema
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="flex items-center gap-3">
-                  <span className="text-sm text-muted-foreground">Estado:</span>
-                  <Badge
-                    variant={isRunning ? "default" : cycleState === "complete" ? "secondary" : "outline"}
-                    className={isRunning ? "animate-pulse" : ""}
-                  >
-                    {stateLabels[cycleState]}
-                  </Badge>
-                </div>
-                <div className="flex items-center gap-3">
-                  <span className="text-sm text-muted-foreground">Horquilla:</span>
-                  <Badge variant={isCarrying ? "default" : "outline"}>{isCarrying ? "Bajo carga" : "Libre"}</Badge>
-                </div>
-                <div className="flex items-center gap-3">
-                  <span className="text-sm text-muted-foreground">Carga:</span>
-                  <Badge variant={isCarrying ? "default" : "outline"} className={isCarrying ? "bg-amber-600" : ""}>
-                    {isCarrying ? "1 kg (Bolsa)" : bagDropped ? "Entregada" : "Sin carga"}
-                  </Badge>
-                </div>
-                <div className="flex items-center gap-3">
-                  <span className="text-sm text-muted-foreground">Piso:</span>
-                  <Badge variant={floorReached ? "default" : "outline"} className={floorReached ? "bg-green-600" : ""}>
-                    {floorReached ? "Alcanzado (Y≈0)" : "No alcanzado"}
-                  </Badge>
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Controls */}
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle>Controles</CardTitle>
-                <CardDescription>Inicia o reinicia el ciclo de paletizado</CardDescription>
-              </CardHeader>
-              <CardContent className="flex gap-4">
-                <Button size="lg" className="flex-1 gap-2" onClick={startCycle} disabled={isRunning}>
-                  <Play className="w-5 h-5" />
-                  Iniciar Ciclo Automático
+             {/* Controles flotantes */}
+             <div className="absolute bottom-4 left-4 right-4 flex gap-2">
+                <Button onClick={start} disabled={cycleState !== "idle"} className="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-semibold">
+                    {cycleState === "idle" ? <><Play className="w-4 h-4 mr-2" /> Iniciar Ciclo</> : <><RefreshCw className="w-4 h-4 mr-2 animate-spin" /> Procesando...</>}
                 </Button>
-                <Button size="lg" variant="outline" onClick={resetCycle} disabled={isRunning}>
-                  <RotateCcw className="w-5 h-5" />
+                <Button onClick={reset} disabled={cycleState !== "idle"} variant="secondary" className="bg-slate-800 text-slate-300 hover:bg-slate-700">
+                    <RotateCcw className="w-4 h-4" />
                 </Button>
-              </CardContent>
+            </div>
+        </Card>
+
+        {/* --- VISTA SUPERIOR (RADAR) & DATOS --- */}
+        <div className="space-y-6">
+            
+            {/* RADAR */}
+            <Card className="bg-slate-900 border-slate-800">
+                <CardHeader className="pb-2 pt-4">
+                    <CardTitle className="text-xs text-slate-400 font-mono flex justify-between">
+                        <span>VISTA SUPERIOR (EJE Z)</span>
+                        <ArrowRightLeft className="w-3 h-3" />
+                    </CardTitle>
+                </CardHeader>
+                <CardContent className="flex justify-center p-6">
+                    <div className="relative w-48 h-48 rounded-full border border-slate-800 bg-slate-950 shadow-inner shadow-black">
+                        {/* Guías de ángulos */}
+                        <div className="absolute top-1/2 left-0 w-full h-[1px] bg-slate-800/50" />
+                        <div className="absolute top-0 left-1/2 w-[1px] h-full bg-slate-800/50" />
+                        
+                        {/* ZONA IN (-45°) */}
+                        <div className="absolute w-full h-full rotate-[-45deg]">
+                            <div className="absolute top-2 left-1/2 -translate-x-1/2 flex flex-col items-center">
+                                <div className={`w-10 h-10 border border-dashed rounded flex items-center justify-center transition-colors duration-300 ${showSugarStand ? "border-blue-500 bg-blue-500/10" : "border-slate-700"}`}>
+                                    <span className="text-[8px] text-slate-500">IN</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* ZONA OUT (+45°) */}
+                        <div className="absolute w-full h-full rotate-[45deg]">
+                            <div className="absolute top-2 left-1/2 -translate-x-1/2 flex flex-col items-center">
+                                <div className={`w-12 h-12 border rounded flex items-center justify-center transition-colors duration-300 ${showPallet ? "border-amber-600 bg-amber-900/20" : "border-slate-700"}`}>
+                                    <span className="text-[8px] text-slate-500">OUT</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* BRAZO (AGUJA) */}
+                        <motion.div 
+                            className="absolute top-1/2 left-1/2 w-[2px] h-[50%] bg-blue-500 origin-top shadow-[0_0_15px_rgba(59,130,246,0.6)]"
+                            animate={{ rotate: currentPos.theta + 180 }}
+                            transition={{ type: "spring", stiffness: 60, damping: 20 }}
+                        >
+                            <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-3 h-3 bg-white rounded-full" />
+                        </motion.div>
+                        
+                        {/* Centro */}
+                        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-6 h-6 bg-slate-800 rounded-full border-2 border-slate-600 z-10" />
+                    </div>
+                </CardContent>
             </Card>
 
-            {/* Real-time Log */}
-            <Card className="border-primary/30">
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm">Registro en Tiempo Real</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="font-mono text-sm p-3 rounded bg-secondary/50 border border-border">
-                  <span className="text-primary">&gt;</span> {actionLog}
-                </div>
-              </CardContent>
+            {/* TELEMETRÍA */}
+            <Card className="bg-slate-900 border-slate-800">
+                <CardHeader className="pb-2 pt-4">
+                    <CardTitle className="text-xs text-slate-400 font-mono flex items-center gap-2">
+                        <AlertCircle className="w-3 h-3" /> DATOS EN TIEMPO REAL
+                    </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                    <div className="grid grid-cols-2 gap-2">
+                        <div className="bg-black/40 p-2 rounded border border-slate-800">
+                            <span className="text-[10px] text-slate-500 block">Ángulo Base (J1)</span>
+                            <span className="text-lg font-mono text-yellow-400">{currentPos.theta.toFixed(1)}°</span>
+                        </div>
+                        <div className="bg-black/40 p-2 rounded border border-slate-800">
+                            <span className="text-[10px] text-slate-500 block">Radio (R)</span>
+                            <span className="text-lg font-mono text-blue-400">{currentPos.r.toFixed(0)}mm</span>
+                        </div>
+                    </div>
+                    
+                    <div className="bg-black/40 p-2 rounded border border-slate-800 flex justify-between items-center">
+                        <span className="text-xs text-slate-400">Estado Gripper</span>
+                        <Badge variant={isGripping ? "destructive" : "secondary"} className="text-[10px]">
+                            {isGripping ? "CERRADO" : "ABIERTO"}
+                        </Badge>
+                    </div>
+
+                    <div className="pt-2 border-t border-slate-800">
+                        <div className="flex justify-between text-[10px] text-slate-500 font-mono">
+                            <span>J2: {angles.shoulder.toFixed(1)}°</span>
+                            <span>J3: {angles.elbow.toFixed(1)}°</span>
+                        </div>
+                    </div>
+                </CardContent>
             </Card>
 
-            {/* Calculated Angles */}
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm">Ángulos Actuales (Cinemática Inversa)</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="grid grid-cols-3 gap-3">
-                  <div className="text-center p-3 rounded-lg bg-secondary">
-                    <p className="text-xs text-muted-foreground mb-1">Base</p>
-                    <p className="font-mono text-lg text-primary">{angles.base.toFixed(1)}°</p>
-                  </div>
-                  <div className="text-center p-3 rounded-lg bg-secondary">
-                    <p className="text-xs text-muted-foreground mb-1">Hombro</p>
-                    <p className="font-mono text-lg text-primary">{angles.shoulder.toFixed(1)}°</p>
-                  </div>
-                  <div className="text-center p-3 rounded-lg bg-secondary">
-                    <p className="text-xs text-muted-foreground mb-1">Codo</p>
-                    <p className="font-mono text-lg text-primary">{angles.elbow.toFixed(1)}°</p>
-                  </div>
-                </div>
-                <div className="mt-3 pt-3 border-t border-border flex justify-between text-xs font-mono text-muted-foreground">
-                  <span>Target X: {targetPos.x}</span>
-                  <span>Target Y: {targetPos.y}</span>
-                </div>
-              </CardContent>
-            </Card>
-          </motion.div>
         </div>
       </div>
-    </section>
+    </div>
   )
 }
