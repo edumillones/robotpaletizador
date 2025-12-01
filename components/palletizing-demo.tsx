@@ -223,7 +223,7 @@ export function PalletizingDemo() {
         <div>
             <h2 className="text-xl font-bold flex items-center gap-2 text-white">
                 <Box className="text-blue-500" /> 
-                Paletizador 3-Ejes v2.0
+                Simulación Final
             </h2>
             <p className="text-slate-400 text-sm">Simulación con Rotación y Perspectiva Corregida</p>
         </div>

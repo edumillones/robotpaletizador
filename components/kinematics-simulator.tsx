@@ -110,7 +110,7 @@ export function KinematicsSimulator() {
             <Cpu className="w-4 h-4 mr-2" />
             Ingeniería Mecatrónica
           </Badge>
-          <h2 className="text-3xl md:text-4xl font-bold mb-4">Simulador de Brazo 2-DOF</h2>
+          <h2 className="text-3xl md:text-4xl font-bold mb-4">Simulación de Cinemática Inversa</h2>
           <p className="text-muted-foreground max-w-2xl mx-auto">
             Cinemática Inversa en tiempo real con corrección de sistema de referencia.
           </p>
